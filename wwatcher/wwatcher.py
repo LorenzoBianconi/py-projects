@@ -6,6 +6,22 @@ import pickle
 import time
 import os
 import datetime
+import socket
+
+DATA_FILE_PATH = '/tmp/sampleList'
+
+RH_PATH = '/sys/bus/iio/devices/iio:device0/'
+RH_SCALE = RH_PATH + 'in_humidityrelative_scale'
+RH_OFFSET = RH_PATH + 'in_humidityrelative_offset'
+RH_RAW = RH_PATH + 'in_humidityrelative_raw'
+
+TEMP_PATH = '/sys/bus/iio/devices/iio:device1/'
+TEMP_SCALE = TEMP_PATH + 'in_temp_scale'
+TEMP_OFFSET = TEMP_PATH + 'in_temp_offset'
+TEMP_RAW = TEMP_PATH + 'in_temp_raw'
+
+TCP_PORT = 9900
+MAX_BUFF_SIZE = 32
 
 def dumpData(data, path):
 	try:
@@ -27,8 +43,14 @@ class WwData:
 	def getTemp(self): return self.temp
 	def printSample(self):
 		print "%s rH=%.3f temp=%.3f" % (self.ts, self.rH, self.temp)
+	def dumpJsonData(self):
+		self.data = "{\"ts\":\"" + self.ts + "\","
+		self.data += "\"rH\":\"" + str(self.rH) + "\","
+		self.data += "\"temp\":\"" + str(self.temp) + "}"
 
-class WwReaderTh(threading.Thread):
+		return self.data
+
+class WwSamplingThread(threading.Thread):
 	def __init__(self, sampleList, lock, shutdownEvent, timeOut):
 		threading.Thread.__init__(self)
 
@@ -41,22 +63,17 @@ class WwReaderTh(threading.Thread):
 		self.maxListSize = 60
 		self.lastSample = datetime.date.today()
 
-		self.rhPath = "/sys/bus/iio/devices/iio:device0/"
-		self.tempPath = "/sys/bus/iio/devices/iio:device1/"
-
-		self.rhScale = self.readData(self.rhPath +
-					     "in_humidityrelative_scale")
-		self.rhOffset = self.readData(self.rhPath +
-					      "in_humidityrelative_offset")
-		self.tempScale = self.readData(self.tempPath + "in_temp_scale")
-		self.tempOffset = self.readData(self.tempPath + "in_temp_offset")
+		self.rhScale = self.readData(RH_SCALE)
+		self.rhOffset = self.readData(RH_OFFSET)
+		self.tempScale = self.readData(TEMP_SCALE)
+		self.tempOffset = self.readData(TEMP_OFFSET)
 
 	def run(self):
 		while not self.shutdownEvent.is_set():
-			rH_raw = self.readData(self.rhPath + "in_humidityrelative_raw")
+			rH_raw = self.readData(RH_RAW)
 			rH = (rH_raw + self.rhOffset) * self.rhScale
 
-			temp_raw = self.readData(self.tempPath+ "in_temp_raw")
+			temp_raw = self.readData(TEMP_RAW)
 			temp = (temp_raw + self.tempOffset) * self.tempScale
 
 			self.lock.acquire()
@@ -68,7 +85,7 @@ class WwReaderTh(threading.Thread):
 
 			sampleTs = datetime.date.today()
 			if sampleTs - self.lastSample >= datetime.timedelta(1) :
-				dumpData(self.sampleList, '/tmp/sampleList')
+				dumpData(self.sampleList, DATA_FILE_PATH)
 				self.self.lastSample = sampleTs
 
 			time.sleep(self.timeOut)
@@ -83,10 +100,49 @@ class WwReaderTh(threading.Thread):
 		except IOError:
 			print "failed to open %s" % path
 
-class WwReader:
+class WwTcpThread(threading.Thread):
+	def __init__(self, sock, sampleList, lock, address):
+		threading.Thread.__init__(self)
+
+		print "WwTcpThread: got connection from %s port %d" % address
+
+		self.sock = sock
+		self.address = address
+
+		self.sampleList = sampleList
+		self.lock = lock
+
+	def run(self):
+		try:
+			while True:
+				self.data = self.sock.recv(MAX_BUFF_SIZE)
+				if self.data:
+					print "WwTcpThread: %s %d" \
+					       " rx %s" % (self.address[0],
+							   self.address[1],
+							   self.data)
+					self.data = "\"items\": ["
+					self.lock.acquire()
+					for i in range(len(self.sampleList)):
+						self.entry = self.sampleList[i].dumpJsonData()
+						self.data += self.entry
+						if i < len(self.sampleList) - 1 :
+							self.data += ","
+					self.lock.release()
+					self.data += "]"
+					self.sock.sendall(self.data)
+				else:
+					print "WwTcpThread: %s %d" \
+					      " connection closed" % self.address
+					break
+
+		finally:
+			self.sock.close()
+
+class Wwatcher:
 	def __init__(self):
 		try:
-			fp = open('/tmp/sampleList', 'r')
+			fp = open(DATA_FILE_PATH, 'r')
 			self.sampleList = pickle.load(fp)
 			fp.close
 		except IOError:
@@ -95,28 +151,41 @@ class WwReader:
 		self.shutdownEvent = threading.Event()
 		self.lock = threading.Lock()
 
-		self.wwThread = WwReaderTh(self.sampleList, self.lock,
-					   self.shutdownEvent, 1800)
+		self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+		self.sock.bind(('', TCP_PORT))
+		self.sock.listen(5)
+
+		self.wwSamplingThread = WwSamplingThread(self.sampleList,
+							 self.lock,
+							 self.shutdownEvent,
+							 1800)
 
 		signal.signal(signal.SIGTERM, self.sigTermHl)
 		signal.signal(signal.SIGINT, self.sigTermHl)
 
 	def startMeasuring(self):
-		print "WwReader: starting process %d" % os.getpid()
-		self.wwThread.start()
+		print "Wwatcher: starting process %d" % os.getpid()
+		self.wwSamplingThread.start()
 
-		while self.wwThread.isAlive():
-			self.wwThread.join(1)
+		try:
+			while not self.shutdownEvent.is_set():
+				self.clientSock, self.clientAddress = self.sock.accept()
 
-		dumpData(self.sampleList, '/tmp/sampleList')
-
-		for i in range(len(self.sampleList)):
-			self.sampleList[i].printSample()
+				self.wwTcpThread = WwTcpThread(self.clientSock,
+							       self.sampleList,
+							       self.lock,
+							       self.clientAddress)
+				self.wwTcpThread.start()
+		except IOError:
+			pass
+		finally:
+			self.sock.close()
+			dumpData(self.sampleList, DATA_FILE_PATH)
 
 	def sigTermHl(self, signum, frame):
 		self.shutdownEvent.set()
 
 if __name__ == '__main__':
-	wwReader = WwReader()
-	wwReader.startMeasuring()
+	wwatcher = Wwatcher()
+	wwatcher.startMeasuring()
 
