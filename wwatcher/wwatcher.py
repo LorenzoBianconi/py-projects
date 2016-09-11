@@ -7,6 +7,8 @@ import time
 import os
 import datetime
 import socket
+import sys
+import getopt
 
 DATA_FILE_PATH = '/tmp/sampleList'
 
@@ -22,6 +24,9 @@ TEMP_RAW = TEMP_PATH + 'in_temp_raw'
 
 TCP_PORT = 9900
 MAX_BUFF_SIZE = 32
+
+def usage():
+	print 'wwatcher.py -h -t <timeout> -s <samples>'
 
 def dumpData(data, path):
 	try:
@@ -39,19 +44,19 @@ class WwData:
 		self.temp = temp
 
 	def getTs(self): return self.ts
-	def getRh(self): return self.rH
-	def getTemp(self): return self.temp
+	def getRh(self): return "{0:.2f}".format(self.rH)
+	def getTemp(self): return "{0:.2f}".format(self.temp)
 	def printSample(self):
 		print "%s rH=%.3f temp=%.3f" % (self.ts, self.rH, self.temp)
 	def dumpJsonData(self):
 		self.data = "{\"ts\":\"" + self.ts + "\","
-		self.data += "\"rH\":\"" + str(self.rH) + "\","
-		self.data += "\"temp\":\"" + str(self.temp) + "}"
+		self.data += "\"rH\":\"" + str(self.getRh()) + "\","
+		self.data += "\"temp\":\"" + str(self.getTemp()) + "\"}"
 
 		return self.data
 
 class WwSamplingThread(threading.Thread):
-	def __init__(self, sampleList, lock, shutdownEvent, timeOut):
+	def __init__(self, sampleList, lock, shutdownEvent, timeOut, samples):
 		threading.Thread.__init__(self)
 
 		self.sampleList = sampleList
@@ -60,7 +65,7 @@ class WwSamplingThread(threading.Thread):
 		self.lock = lock
 
 		self.timeOut = timeOut
-		self.maxListSize = 60
+		self.maxListSize = samples
 		self.lastSample = datetime.date.today()
 
 		self.rhScale = self.readData(RH_SCALE)
@@ -140,7 +145,7 @@ class WwTcpThread(threading.Thread):
 			self.sock.close()
 
 class Wwatcher:
-	def __init__(self):
+	def __init__(self, timeout, samples):
 		try:
 			fp = open(DATA_FILE_PATH, 'r')
 			self.sampleList = pickle.load(fp)
@@ -158,7 +163,7 @@ class Wwatcher:
 		self.wwSamplingThread = WwSamplingThread(self.sampleList,
 							 self.lock,
 							 self.shutdownEvent,
-							 1800)
+							 timeout, samples)
 
 		signal.signal(signal.SIGTERM, self.sigTermHl)
 		signal.signal(signal.SIGINT, self.sigTermHl)
@@ -186,6 +191,26 @@ class Wwatcher:
 		self.shutdownEvent.set()
 
 if __name__ == '__main__':
-	wwatcher = Wwatcher()
-	wwatcher.startMeasuring()
+	try:
+		#default values
+		timeout = 1800
+		samples = 336
+		opts, args = getopt.getopt(sys.argv[1:],"ht:s:",
+					   ["help", "timeout", "samples"])
+		for opt, arg in opts:
+			if opt in ("-h", "--help"):
+				usage()
+				sys.exit()
+			elif opt in ("-t", "--timeout"):
+				timeout = int(arg)
+			elif opt in ("-s", "--samples"):
+				samples = int(arg)
+			else:
+				assert False, "unhandled option"
+
+		wwatcher = Wwatcher(timeout, samples)
+		wwatcher.startMeasuring()
+	except getopt.GetoptError:
+		usage()
+		sys.exit(2)
 
