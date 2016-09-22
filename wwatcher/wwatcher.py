@@ -156,6 +156,11 @@ class Wwatcher:
 		self.shutdownEvent = threading.Event()
 		self.lock = threading.Lock()
 
+		if len(self.sampleList) > samples :
+			for i in range(len(self.sampleList) - samples):
+				staleSample = self.sampleList.pop(0)
+				del staleSample
+
 		self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 		self.sock.bind(('', TCP_PORT))
 		self.sock.listen(5)
