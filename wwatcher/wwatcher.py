@@ -91,7 +91,7 @@ class WwSamplingThread(threading.Thread):
 			sampleTs = datetime.date.today()
 			if sampleTs - self.lastSample >= datetime.timedelta(1) :
 				dumpData(self.sampleList, DATA_FILE_PATH)
-				self.self.lastSample = sampleTs
+				self.lastSample = sampleTs
 
 			time.sleep(self.timeOut)
 
